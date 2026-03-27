@@ -1,8 +1,20 @@
+require("dotenv").config();
+// console.log("API_KEY:", process.env.API_KEY);
 const si = require("systeminformation");
 const axios = require("axios");
 const { exec } = require("child_process");
+const { randomUUID } = require("crypto");
 
 let activeWin;
+
+const API_URL = process.env.API_URL;
+const API_KEY = process.env.API_KEY;
+
+const DEVICE_ID = "device-" + Math.floor(Math.random() * 1000);
+const USER_ID = "user-001";
+const SESSION_ID = "session-" + Date.now();
+
+let buffer = [];
 
 async function getActiveApp() {
   try {
@@ -26,34 +38,67 @@ async function getActiveApp() {
   });
 }
 
-const DEVICE_ID = "device-" + Math.floor(Math.random() * 1000);
+async function collect() {
+  const cpu = await si.currentLoad();
+  const mem = await si.mem();
+  const app = await getActiveApp();
 
-async function collectAndSend() {
+  return {
+    eventId: randomUUID(),
+    userId: USER_ID,
+    deviceId: DEVICE_ID,
+    sessionId: SESSION_ID,
+
+    timestamp: new Date(),
+
+    cpu: cpu.currentLoad,
+    memory: (mem.used / mem.total) * 100,
+    activeApp: app,
+  };
+}
+
+async function flush() {
+  if (buffer.length === 0) return;
+
   try {
-    const cpu = await si.currentLoad();
-    const mem = await si.mem();
-    const app = await getActiveApp();
+    await axios.post(API_URL, buffer, {
+      headers: {
+        "x-api-key": API_KEY,
+      },
+    });
 
-    const data = {
-      deviceId: DEVICE_ID,
-      timestamp: new Date(),
-      cpu: cpu.currentLoad,
-      memory: (mem.used / mem.total) * 100,
-      activeApp: app,
-    };
-
-    await axios.post("http://localhost:3000/metrics", data);
-
-    console.log("sent", data);
+    // console.log(`✅ sent batch (${buffer.length})`);
+    buffer.forEach((item, i) => {
+      console.log(`--- Record ${i + 1} ---`);
+      console.log(`App: ${item.activeApp}`);
+      console.log(`CPU: ${item.cpu.toFixed(2)}%`);
+      console.log(`Memory: ${item.memory.toFixed(2)}%`);
+      console.log(`Time: ${item.timestamp}`);
+    });
+    buffer = [];
   } catch (err) {
-    console.log("error...");
+    console.log("ERROR:", err.response?.data || err.message);
+
+    setTimeout(flush, 2000);
   }
 }
 
 async function loop() {
   while (true) {
-    await collectAndSend();
-    await new Promise((res) => setTimeout(res, 5000));
+    try {
+      const data = await collect();
+      buffer.push(data);
+
+      console.log("collected", data.activeApp);
+
+      if (buffer.length >= 10) {
+        await flush();
+      }
+    } catch (err) {
+      console.log("error collecting...");
+    }
+
+    await new Promise((res) => setTimeout(res, 1000));
   }
 }
 
